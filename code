@@ -1,0 +1,736 @@
+"""
+============================================================
+  Customer Segmentation System — Single-File Flask App
+============================================================
+
+INSTRUCTIONS TO RUN:
+1. Install dependencies:
+       pip install flask pandas numpy scikit-learn matplotlib
+
+2. Run the app:
+       python customer_segmentation.py
+
+3. Open your browser at:
+       http://127.0.0.1:5000
+
+CSV FORMAT:
+  Your CSV should contain numeric columns such as:
+    - Age
+    - Annual Income (k$)
+    - Spending Score (1-100)
+  A sample "Mall_Customers.csv" works out of the box.
+  Any CSV with at least 2 numeric columns will work.
+============================================================
+"""
+
+# ── Standard library ──────────────────────────────────────
+import io
+import base64
+import warnings
+warnings.filterwarnings("ignore")
+
+# ── Third-party ───────────────────────────────────────────
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")          # Non-interactive backend (no display needed)
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+
+from flask import Flask, request, render_template_string, redirect, url_for
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
+
+# ─────────────────────────────────────────────────────────
+#  Flask application instance
+# ─────────────────────────────────────────────────────────
+app = Flask(__name__)
+app.secret_key = "segmentation-secret-key"
+
+
+# ─────────────────────────────────────────────────────────
+#  Embedded HTML templates (render_template_string)
+# ─────────────────────────────────────────────────────────
+
+BASE_STYLE = """
+<style>
+  /* ── Reset & base ── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  header {
+    background: linear-gradient(135deg, #1e40af 0%, #7c3aed 100%);
+    padding: 28px 40px;
+    text-align: center;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  }
+  header h1 { font-size: 2rem; letter-spacing: 1px; }
+  header p  { margin-top: 6px; opacity: .8; font-size: .95rem; }
+
+  /* ── Main container ── */
+  .container {
+    max-width: 1100px;
+    margin: 36px auto;
+    padding: 0 20px;
+  }
+
+  /* ── Cards ── */
+  .card {
+    background: #1e293b;
+    border-radius: 14px;
+    padding: 28px 32px;
+    margin-bottom: 28px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+  }
+  .card h2 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #334155;
+    padding-bottom: 10px;
+  }
+
+  /* ── Upload form ── */
+  .upload-zone {
+    border: 2px dashed #334155;
+    border-radius: 10px;
+    padding: 36px;
+    text-align: center;
+    transition: border-color .2s;
+  }
+  .upload-zone:hover { border-color: #6366f1; }
+  .upload-zone input[type=file] {
+    display: block;
+    margin: 0 auto 18px;
+    color: #cbd5e1;
+  }
+
+  /* ── Cluster slider ── */
+  .form-row {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+  .form-row label { font-size: .9rem; color: #94a3b8; white-space: nowrap; }
+  .form-row input[type=range] { flex: 1; min-width: 160px; accent-color: #6366f1; }
+  .form-row span {
+    background: #334155;
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-weight: 700;
+    min-width: 36px;
+    text-align: center;
+  }
+  .toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: .9rem;
+    color: #94a3b8;
+    cursor: pointer;
+    margin-top: 14px;
+    user-select: none;
+  }
+  .toggle-label input[type=checkbox] { accent-color: #6366f1; width: 16px; height: 16px; }
+
+  /* ── Button ── */
+  .btn {
+    display: inline-block;
+    margin-top: 20px;
+    padding: 12px 34px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity .2s, transform .1s;
+    letter-spacing: .03em;
+  }
+  .btn:hover  { opacity: .88; }
+  .btn:active { transform: scale(.97); }
+
+  /* ── Stats row ── */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }
+  .stat-box {
+    background: #0f172a;
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+    border: 1px solid #1e293b;
+  }
+  .stat-box .value { font-size: 2rem; font-weight: 700; color: #818cf8; }
+  .stat-box .label { font-size: .8rem; color: #64748b; margin-top: 4px; text-transform: uppercase; letter-spacing: .07em; }
+
+  /* ── Plots ── */
+  .plots-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
+    gap: 22px;
+  }
+  .plot-box img {
+    width: 100%;
+    border-radius: 8px;
+    border: 1px solid #334155;
+  }
+  .plot-box p {
+    font-size: .82rem;
+    color: #64748b;
+    margin-top: 8px;
+    text-align: center;
+  }
+
+  /* ── Table ── */
+  .table-wrap { overflow-x: auto; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .88rem;
+  }
+  thead tr { background: #0f172a; }
+  thead th {
+    padding: 10px 14px;
+    text-align: left;
+    color: #818cf8;
+    font-weight: 600;
+    letter-spacing: .05em;
+    border-bottom: 2px solid #334155;
+  }
+  tbody tr:nth-child(even) { background: #162032; }
+  tbody td { padding: 9px 14px; border-bottom: 1px solid #1e293b; }
+  .cluster-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: .78rem;
+    font-weight: 700;
+    color: #fff;
+  }
+
+  /* ── Error alert ── */
+  .alert {
+    background: #450a0a;
+    border: 1px solid #b91c1c;
+    color: #fca5a5;
+    padding: 14px 20px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+  }
+
+  /* ── Column pills ── */
+  .pill {
+    display: inline-block;
+    background: #1e3a5f;
+    color: #93c5fd;
+    border-radius: 20px;
+    padding: 3px 12px;
+    font-size: .82rem;
+    margin: 3px 2px;
+  }
+
+  footer {
+    text-align: center;
+    padding: 22px;
+    color: #334155;
+    font-size: .82rem;
+  }
+</style>
+<script>
+  // Live-update the slider value label
+  function updateSlider(val) {
+    document.getElementById('kDisplay').textContent = val;
+  }
+  // Toggle slider visibility
+  function toggleManual(cb) {
+    document.getElementById('sliderRow').style.display = cb.checked ? 'flex' : 'none';
+  }
+</script>
+"""
+
+INDEX_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Customer Segmentation System</title>
+  """ + BASE_STYLE + """
+</head>
+<body>
+  <header>
+    <h1>🧩 Customer Segmentation System</h1>
+    <p>Upload a CSV file to automatically segment your customers using K-Means clustering</p>
+  </header>
+
+  <div class="container">
+    {% if error %}
+    <div class="alert">⚠️ {{ error }}</div>
+    {% endif %}
+
+    <!-- ── Upload Card ── -->
+    <div class="card">
+      <h2>📂 Upload Customer Data</h2>
+      <form method="POST" action="/analyze" enctype="multipart/form-data">
+        <div class="upload-zone">
+          <p style="font-size:2.2rem; margin-bottom:10px;">📊</p>
+          <p style="color:#94a3b8; margin-bottom:16px;">
+            Select a CSV file with numeric columns (Age, Income, Spending Score, etc.)
+          </p>
+          <input type="file" name="csv_file" accept=".csv" required>
+        </div>
+
+        <!-- Manual cluster toggle -->
+        <label class="toggle-label">
+          <input type="checkbox" id="manualToggle" name="manual_k"
+                 onchange="toggleManual(this)"
+                 {% if manual_k %}checked{% endif %}>
+          Manually specify number of clusters
+        </label>
+
+        <div class="form-row" id="sliderRow"
+             style="display: {% if manual_k %}flex{% else %}none{% endif %};">
+          <label>Number of clusters (k):</label>
+          <input type="range" name="k_value" min="2" max="10"
+                 value="{{ k_value or 3 }}"
+                 oninput="updateSlider(this.value)">
+          <span id="kDisplay">{{ k_value or 3 }}</span>
+        </div>
+
+        <div style="text-align:center;">
+          <button type="submit" class="btn">🚀 Run Segmentation</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- ── Info Card ── -->
+    <div class="card">
+      <h2>ℹ️ How it works</h2>
+      <p style="color:#94a3b8; line-height:1.7;">
+        <strong style="color:#e2e8f0;">1. Upload</strong> — Provide a CSV file with numeric customer features.<br>
+        <strong style="color:#e2e8f0;">2. Preprocess</strong> — Missing values are filled and features are scaled automatically.<br>
+        <strong style="color:#e2e8f0;">3. Elbow Method</strong> — The optimal k is detected by finding the "elbow" in inertia curve.<br>
+        <strong style="color:#e2e8f0;">4. Cluster</strong> — K-Means assigns each customer to a segment.<br>
+        <strong style="color:#e2e8f0;">5. Visualise</strong> — PCA reduces dimensions for the 2-D scatter plot.
+      </p>
+    </div>
+  </div>
+
+  <footer>Customer Segmentation System &mdash; Built with Flask · Pandas · Scikit-learn · Matplotlib</footer>
+</body>
+</html>
+"""
+
+RESULTS_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Segmentation Results</title>
+  """ + BASE_STYLE + """
+</head>
+<body>
+  <header>
+    <h1>🧩 Customer Segmentation Results</h1>
+    <p>Analysis complete — {{ n_rows }} customers segmented into {{ n_clusters }} groups</p>
+  </header>
+
+  <div class="container">
+
+    <!-- ── Stats Row ── -->
+    <div class="stats">
+      <div class="stat-box">
+        <div class="value">{{ n_clusters }}</div>
+        <div class="label">Clusters Found</div>
+      </div>
+      <div class="stat-box">
+        <div class="value">{{ n_rows }}</div>
+        <div class="label">Customers</div>
+      </div>
+      <div class="stat-box">
+        <div class="value">{{ n_features }}</div>
+        <div class="label">Features Used</div>
+      </div>
+      <div class="stat-box">
+        <div class="value">{{ silhouette }}</div>
+        <div class="label">Silhouette Score</div>
+      </div>
+    </div>
+
+    <!-- ── Features Used ── -->
+    <div class="card">
+      <h2>🔢 Features Used</h2>
+      {% for col in feature_cols %}
+        <span class="pill">{{ col }}</span>
+      {% endfor %}
+      {% if method == "auto" %}
+        <p style="margin-top:12px; color:#64748b; font-size:.85rem;">
+          ✅ Optimal k was determined automatically via the <strong>Elbow Method</strong>.
+        </p>
+      {% else %}
+        <p style="margin-top:12px; color:#64748b; font-size:.85rem;">
+          🔧 k was set <strong>manually</strong> to {{ n_clusters }}.
+        </p>
+      {% endif %}
+    </div>
+
+    <!-- ── Plots ── -->
+    <div class="card">
+      <h2>📈 Visualisations</h2>
+      <div class="plots-grid">
+        <div class="plot-box">
+          <img src="data:image/png;base64,{{ elbow_plot }}" alt="Elbow Plot">
+          <p>Elbow Method — Inertia vs Number of Clusters</p>
+        </div>
+        <div class="plot-box">
+          <img src="data:image/png;base64,{{ scatter_plot }}" alt="Cluster Scatter">
+          <p>2-D Cluster Scatter (PCA projection)</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Data Preview ── -->
+    <div class="card">
+      <h2>🗂️ Data Preview (first 10 rows with Cluster Label)</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              {% for col in table_cols %}
+              <th>{{ col }}</th>
+              {% endfor %}
+              <th>Cluster</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in table_rows %}
+            <tr>
+              {% for cell in row[:-1] %}
+              <td>{{ cell }}</td>
+              {% endfor %}
+              <td>
+                <span class="cluster-badge"
+                      style="background:{{ cluster_colors[row[-1]] }};">
+                  Cluster {{ row[-1] }}
+                </span>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Cluster Summary ── -->
+    <div class="card">
+      <h2>📊 Cluster Summary (mean values)</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Cluster</th>
+              {% for col in feature_cols %}
+              <th>{{ col }}</th>
+              {% endfor %}
+              <th>Size</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in summary_rows %}
+            <tr>
+              <td>
+                <span class="cluster-badge"
+                      style="background:{{ cluster_colors[row[0]] }};">
+                  Cluster {{ row[0] }}
+                </span>
+              </td>
+              {% for val in row[1:-1] %}
+              <td>{{ val }}</td>
+              {% endfor %}
+              <td>{{ row[-1] }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+      </div>
+    </div>
+
+    <div style="text-align:center; margin-bottom:28px;">
+      <a href="/" class="btn">⬅ Analyse Another File</a>
+    </div>
+  </div>
+
+  <footer>Customer Segmentation System &mdash; Built with Flask · Pandas · Scikit-learn · Matplotlib</footer>
+</body>
+</html>
+"""
+
+
+# ─────────────────────────────────────────────────────────
+#  Helper: matplotlib figure → base64 PNG string
+# ─────────────────────────────────────────────────────────
+def fig_to_base64(fig):
+    """Convert a Matplotlib figure to a base-64-encoded PNG string."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=110, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    buf.seek(0)
+    encoded = base64.b64encode(buf.read()).decode("utf-8")
+    plt.close(fig)
+    return encoded
+
+
+# ─────────────────────────────────────────────────────────
+#  Helper: Elbow Method — find optimal k
+# ─────────────────────────────────────────────────────────
+def find_optimal_k(X, k_max=10):
+    """
+    Compute inertia for k = 2 … k_max and detect the 'elbow'
+    using the maximum second-derivative (kneedle-lite approach).
+    Returns (optimal_k, list_of_inertias).
+    """
+    k_range = range(2, min(k_max + 1, len(X)))  # can't have more clusters than rows
+    inertias = []
+
+    for k in k_range:
+        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+        km.fit(X)
+        inertias.append(km.inertia_)
+
+    # Second-derivative heuristic to find the elbow index
+    if len(inertias) < 3:
+        return list(k_range)[0], inertias
+
+    diffs1 = np.diff(inertias)          # first derivative
+    diffs2 = np.diff(diffs1)            # second derivative
+    elbow_idx = int(np.argmax(diffs2)) + 2   # +2 because k starts at 2 & two diffs
+    optimal_k = list(k_range)[elbow_idx]
+
+    return optimal_k, inertias
+
+
+# ─────────────────────────────────────────────────────────
+#  Helper: plot elbow curve
+# ─────────────────────────────────────────────────────────
+def plot_elbow(inertias, optimal_k, k_max=10):
+    """Return base-64 PNG of the elbow curve."""
+    k_range = range(2, min(k_max + 1, len(inertias) + 2))
+    fig, ax = plt.subplots(figsize=(7, 4), facecolor="#1e293b")
+    ax.set_facecolor("#0f172a")
+
+    ax.plot(list(k_range), inertias, "o-", color="#818cf8",
+            linewidth=2.2, markersize=7, markerfacecolor="#c4b5fd")
+    ax.axvline(optimal_k, color="#f43f5e", linestyle="--",
+               linewidth=1.8, label=f"Optimal k = {optimal_k}")
+
+    ax.set_xlabel("Number of Clusters (k)", color="#94a3b8")
+    ax.set_ylabel("Inertia", color="#94a3b8")
+    ax.set_title("Elbow Method", color="#e2e8f0", fontsize=13, fontweight="bold")
+    ax.tick_params(colors="#64748b")
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#334155")
+    ax.legend(facecolor="#1e293b", edgecolor="#334155",
+              labelcolor="#e2e8f0", fontsize=9)
+    fig.tight_layout()
+    return fig_to_base64(fig)
+
+
+# ─────────────────────────────────────────────────────────
+#  Helper: 2-D scatter plot (PCA)
+# ─────────────────────────────────────────────────────────
+def plot_clusters(X_scaled, labels, n_clusters):
+    """Project X to 2-D via PCA and plot coloured clusters."""
+    pca = PCA(n_components=2, random_state=42)
+    X2d = pca.fit_transform(X_scaled)
+
+    palette = cm.get_cmap("tab10", n_clusters)
+    colors  = [palette(i) for i in range(n_clusters)]
+
+    fig, ax = plt.subplots(figsize=(7, 5), facecolor="#1e293b")
+    ax.set_facecolor("#0f172a")
+
+    for c in range(n_clusters):
+        mask = labels == c
+        ax.scatter(X2d[mask, 0], X2d[mask, 1],
+                   color=colors[c], s=50, alpha=0.78,
+                   edgecolors="none", label=f"Cluster {c}")
+
+    ax.set_xlabel("PCA Component 1", color="#94a3b8")
+    ax.set_ylabel("PCA Component 2", color="#94a3b8")
+    ax.set_title("Customer Segments (PCA Projection)",
+                 color="#e2e8f0", fontsize=13, fontweight="bold")
+    ax.tick_params(colors="#64748b")
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#334155")
+    ax.legend(facecolor="#1e293b", edgecolor="#334155",
+              labelcolor="#e2e8f0", fontsize=9, markerscale=1.4)
+    fig.tight_layout()
+    return fig_to_base64(fig)
+
+
+# ─────────────────────────────────────────────────────────
+#  Cluster badge colours (hex, for template)
+# ─────────────────────────────────────────────────────────
+BADGE_COLORS = [
+    "#6366f1", "#f43f5e", "#10b981", "#f59e0b",
+    "#06b6d4", "#8b5cf6", "#ec4899", "#84cc16",
+    "#14b8a6", "#f97316",
+]
+
+
+# ─────────────────────────────────────────────────────────
+#  Routes
+# ─────────────────────────────────────────────────────────
+
+@app.route("/", methods=["GET"])
+def index():
+    """Landing page with the upload form."""
+    return render_template_string(INDEX_TEMPLATE, error=None,
+                                  manual_k=False, k_value=3)
+
+
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    """
+    1. Read uploaded CSV.
+    2. Identify numeric columns.
+    3. Preprocess (impute + scale).
+    4. Run elbow method (or use manual k).
+    5. Fit final KMeans.
+    6. Build plots and summary.
+    7. Render results page.
+    """
+    # ── 1. Receive file ──────────────────────────────────
+    file = request.files.get("csv_file")
+    if file is None or file.filename == "":
+        return render_template_string(INDEX_TEMPLATE,
+                                      error="No file uploaded. Please select a CSV.",
+                                      manual_k=False, k_value=3)
+
+    try:
+        df = pd.read_csv(file)
+    except Exception as exc:
+        return render_template_string(INDEX_TEMPLATE,
+                                      error=f"Could not parse CSV: {exc}",
+                                      manual_k=False, k_value=3)
+
+    if df.empty:
+        return render_template_string(INDEX_TEMPLATE,
+                                      error="The uploaded CSV is empty.",
+                                      manual_k=False, k_value=3)
+
+    # ── 2. Select numeric columns ────────────────────────
+    num_df = df.select_dtypes(include=[np.number])
+    if num_df.shape[1] < 2:
+        return render_template_string(INDEX_TEMPLATE,
+                                      error="Need at least 2 numeric columns for clustering.",
+                                      manual_k=False, k_value=3)
+
+    feature_cols = num_df.columns.tolist()
+
+    # ── 3. Preprocessing ─────────────────────────────────
+    # Fill missing values with column median
+    num_df = num_df.fillna(num_df.median())
+
+    # Scale features to zero mean, unit variance
+    scaler   = StandardScaler()
+    X_scaled = scaler.fit_transform(num_df.values)
+
+    # ── 4. Determine k ───────────────────────────────────
+    manual_k   = "manual_k" in request.form
+    k_value    = int(request.form.get("k_value", 3))
+
+    K_MAX = 10
+    if manual_k:
+        optimal_k = max(2, min(k_value, len(df) - 1, K_MAX))
+        # Still compute inertias for the elbow plot
+        _, inertias = find_optimal_k(X_scaled, k_max=K_MAX)
+        method = "manual"
+    else:
+        optimal_k, inertias = find_optimal_k(X_scaled, k_max=K_MAX)
+        method = "auto"
+
+    # ── 5. Final KMeans ──────────────────────────────────
+    km     = KMeans(n_clusters=optimal_k, random_state=42, n_init=10)
+    labels = km.fit_predict(X_scaled)
+
+    # Silhouette score (meaningful only for k >= 2)
+    try:
+        sil = round(silhouette_score(X_scaled, labels), 3)
+    except Exception:
+        sil = "N/A"
+
+    # ── 6. Plots ─────────────────────────────────────────
+    elbow_plot   = plot_elbow(inertias, optimal_k, k_max=K_MAX)
+    scatter_plot = plot_clusters(X_scaled, labels, optimal_k)
+
+    # ── 7. Data preview (first 10 rows) ──────────────────
+    preview_df         = num_df.head(10).copy()
+    preview_df["Cluster"] = labels[:10]
+
+    table_cols = feature_cols
+    table_rows = [
+        [round(v, 2) if isinstance(v, float) else v
+         for v in row.tolist()]
+        for _, row in preview_df.iterrows()
+    ]
+
+    # ── 8. Cluster summary ───────────────────────────────
+    full_df           = num_df.copy()
+    full_df["Cluster"] = labels
+    grp                = full_df.groupby("Cluster")
+
+    summary_rows = []
+    for c in range(optimal_k):
+        g    = grp.get_group(c)
+        means = [round(g[col].mean(), 2) for col in feature_cols]
+        summary_rows.append([c] + means + [len(g)])
+
+    # ── Colour map for badges ────────────────────────────
+    cluster_colors = {i: BADGE_COLORS[i % len(BADGE_COLORS)]
+                      for i in range(optimal_k)}
+
+    return render_template_string(
+        RESULTS_TEMPLATE,
+        n_clusters    = optimal_k,
+        n_rows        = len(df),
+        n_features    = len(feature_cols),
+        silhouette    = sil,
+        feature_cols  = feature_cols,
+        elbow_plot    = elbow_plot,
+        scatter_plot  = scatter_plot,
+        table_cols    = table_cols,
+        table_rows    = table_rows,
+        summary_rows  = summary_rows,
+        cluster_colors= cluster_colors,
+        method        = method,
+    )
+
+
+# ─────────────────────────────────────────────────────────
+#  Entry point
+# ─────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print("\n" + "="*54)
+    print("  Customer Segmentation System")
+    print("  Running at http://127.0.0.1:5000")
+    print("="*54 + "\n")
+    app.run(debug=True, host="0.0.0.0", port=5000)
